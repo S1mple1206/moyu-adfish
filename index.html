@@ -8,6 +8,11 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div class="tab-strip">
+    <div id="tabs" role="tablist" aria-label="浏览器标签页"></div>
+    <button id="new-tab" title="新建标签页（Ctrl+T）" aria-label="新建标签页">+</button>
+    <nav class="window-controls"><button id="menu-button" title="菜单" aria-label="菜单" aria-haspopup="menu" aria-expanded="false">⋯</button><button id="minimize" title="最小化" aria-label="最小化">−</button><button id="close" title="关闭" aria-label="关闭">×</button></nav>
+  </div>
   <header>
     <button id="go-home" class="home-button" title="回到主页" aria-label="首页"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7M5 9v11h5v-6h4v6h5V9"/></svg></button>
     <nav class="browser-nav" aria-label="网页导航">
@@ -16,7 +21,6 @@
       <button id="reload" title="刷新（F5）" aria-label="刷新" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button>
     </nav>
     <form id="address-form" class="top-address-form"><input id="address" aria-label="网址或搜索" aria-describedby="address-error" placeholder="网址或搜索" autocomplete="off" spellcheck="false" required><span id="address-error" class="visually-hidden" role="alert"></span></form>
-    <nav class="window-controls"><button id="menu-button" title="菜单" aria-label="菜单" aria-haspopup="menu" aria-expanded="false">⋯</button><button id="minimize" title="最小化" aria-label="最小化">−</button><button id="close" title="关闭" aria-label="关闭">×</button></nav>
   </header>
   <section id="error-panel" hidden><h2>暂时无法打开网页</h2><p id="error-detail"></p><button id="retry" class="primary">重新加载</button><p>请检查网络连接或输入其他网址。</p></section>
   <dialog id="settings-dialog">

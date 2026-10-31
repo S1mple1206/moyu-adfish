@@ -9,6 +9,7 @@ async function command(action, value) {
   return result;
 }
 window.browser.onState(next => {
+  const tabChanged = state?.tabs?.find(tab => tab.active)?.id !== next.tabs?.find(tab => tab.active)?.id;
   state = next;
   document.documentElement.dataset.theme = next.config.theme;
   $('menu-button').setAttribute('aria-expanded', String(next.menuOpen));
@@ -16,14 +17,59 @@ window.browser.onState(next => {
   $('forward').disabled = !next.forward;
   $('reload').disabled = !next.url;
   document.title = next.config.title;
+  renderTabs(next.tabs);
   $('error-panel').hidden = !next.failure;
   $('error-detail').textContent = next.failure;
   $('quick-close-error').textContent = next.quickCloseError || '';
-  if (document.activeElement !== $('address')) {
+  if (tabChanged && document.activeElement === $('address')) $('address').blur();
+  if (tabChanged || document.activeElement !== $('address')) {
     $('address').value = next.url;
     clearAddressError();
   }
   if (!next.settings && $('settings-dialog').open) $('settings-dialog').close();
+});
+let renderedActiveTab;
+function renderTabs(tabs) {
+  if (!tabs) return;
+  const container = $('tabs');
+  for (const element of [...container.children]) {
+    if (!tabs.some(tab => String(tab.id) === element.dataset.id)) element.remove();
+  }
+  for (const tab of tabs) {
+    let element = [...container.children].find(item => item.dataset.id === String(tab.id));
+    if (!element) {
+      element = document.createElement('div');
+      element.dataset.id = tab.id; element.className = 'browser-tab';
+      const select = document.createElement('button');
+      select.className = 'tab-select'; select.setAttribute('role', 'tab');
+      select.onclick = () => command('tab-select', tab.id);
+      const close = document.createElement('button');
+      close.className = 'tab-close'; close.textContent = '×';
+      close.onclick = () => command('tab-close', tab.id);
+      element.append(select, close); container.append(element);
+    }
+    element.classList.toggle('active', tab.active);
+    const select = element.querySelector('.tab-select');
+    select.textContent = tab.title;
+    select.title = (tab.loading ? '正在加载：' : '') + tab.title;
+    select.setAttribute('aria-selected', String(tab.active));
+    select.tabIndex = tab.active ? 0 : -1;
+    element.querySelector('.tab-close').setAttribute('aria-label', `关闭标签页：${tab.title}`);
+    if (tab.active && renderedActiveTab !== tab.id) {
+      element.scrollIntoView({ block: 'nearest', inline: 'nearest' }); renderedActiveTab = tab.id;
+    }
+  }
+}
+$('new-tab').onclick = () => command('tab-new');
+new ResizeObserver(() => {
+  document.querySelector('.browser-tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}).observe($('tabs'));
+$('tabs').addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const tabs = state.tabs, index = tabs.findIndex(tab => tab.active);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowLeft' ? tabs.length - 1 : 1)) % tabs.length;
+  command('tab-select', tabs[next].id);
 });
 function clearAddressError() {
   $('address').setCustomValidity('');

@@ -1,13 +1,13 @@
 {
   "name": "adfish",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "摸鱼助手（adfish）：支持隐身模式的小窗口浏览器",
   "main": "main.js",
   "private": true,
   "scripts": {
     "postinstall": "install-electron",
     "start": "electron .",
-    "test": "node --test url.test.js",
+    "test": "node --test *.test.js",
     "package": "electron-packager . adfish --icon=assets/adfish.ico --platform=win32 --arch=x64 --out=release-build --overwrite --ignore=release --ignore=dist --ignore=data --ignore=webview2 --ignore=electron-runtime --ignore=\\.test\\.js$ --ignore=qa",
     "dist:windows": "node build-distribution.cjs",
     "verify:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify-distribution.ps1"

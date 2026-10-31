@@ -38,12 +38,18 @@ config.pauseOnLeave = !!config.pauseOnLeave;
 config.quickClose = !!config.quickClose;
 if (!Object.hasOwn(quickCloseKeys, config.quickCloseKey) || config.quickCloseKey === 'Alt') config.quickCloseKey = 'Control';
 let quickCloseControl, quickCloseError = '', quickClosing = false;
-let win, view, menuWindow, settings = false, failure = '', status = '就绪', saveTimer, cursorTimer, menuOpen = false, menuHovered = false, addressFocused = false, edgeResizeBounds, audioControl, audioError = '', stealthHidden = false, movingWindow = false;
-let htmlFullscreen = false;
+let win, view, menuWindow, settings = false, saveTimer, cursorTimer, menuOpen = false, menuHovered = false, addressFocused = false, edgeResizeBounds, audioControl, audioError = '', stealthHidden = false, movingWindow = false;
+const tabs = [];
+let activeTab, nextTabId = 1, closing = false;
+const chromeHeight = 58;
 let mediaAway = false;
 let manualHidden = false;
 let manualReveal = false;
-if (!app.requestSingleInstanceLock()) app.quit();
+if (!app.requestSingleInstanceLock()) {
+  // No windows exist in this process; stop before Chromium opens the shared cache.
+  app.exit(0);
+  return;
+}
 app.on('second-instance', () => { if (win && !win.isDestroyed() && !manualHidden) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); } });
 const shellURL = pathToFileURL(path.join(__dirname, 'index.html')).href;
 const menuURL = pathToFileURL(path.join(__dirname, 'menu.html')).href;
@@ -54,16 +60,20 @@ function save() {
     fs.writeFileSync(`${configFile}.tmp`, JSON.stringify(config, null, 2));
     fs.renameSync(`${configFile}.tmp`, configFile);
     return true;
-  } catch { status = '设置保存失败，请检查目录权限'; return false; }
+  } catch { activeTab.status = '设置保存失败，请检查目录权限'; return false; }
 }
 function layout() {
-  if (!win || win.isDestroyed()) return;
+  if (!win || win.isDestroyed() || !activeTab) return;
   const [width, height] = win.getContentSize();
-  view.setBounds({ x: 2, y: 30, width: Math.max(1, width - 4), height: Math.max(1, height - 31) });
+  for (const tab of tabs) {
+    const tabView = tab.view;
+    tabView.setBounds({ x: 2, y: chromeHeight, width: Math.max(1, width - 4), height: Math.max(1, height - chromeHeight - 1) });
+    tabView.setVisible(tab === activeTab && !settings && !tab.failure);
+  }
   // Keep a desktop-width layout; Chromium scales text, images and input coordinates together.
-  const zoom = !htmlFullscreen && config.autoScale ? Math.min(5, Math.max(0.25, (width - 4) / 1280)) : 1;
+  const zoom = !activeTab.htmlFullscreen && config.autoScale ? Math.min(5, Math.max(0.25, (width - 4) / 1280)) : 1;
   if (Math.abs(view.webContents.getZoomFactor() - zoom) > 0.0001) view.webContents.setZoomFactor(zoom);
-  const visible = !settings && !failure;
+  const visible = !settings && !activeTab.failure;
   if (view.getVisible() !== visible) view.setVisible(visible);
   if (!visible && !menuOpen && win.isVisible()) win.webContents.focus();
 }
@@ -81,7 +91,7 @@ function syncMediaPause() {
   const away = config.pauseOnLeave && (manualHidden || (!movingWindow && (win.isMinimized() || !cursorInsideWindow())));
   if (mediaAway === away) return;
   mediaAway = away;
-  for (const frame of view.webContents.mainFrame.framesInSubtree) {
+  for (const tab of tabs) for (const frame of tab.view.webContents.mainFrame.framesInSubtree) {
     frame.executeJavaScript(mediaPauseScript(away)).catch(() => {});
   }
 }
@@ -113,23 +123,23 @@ function syncStealthMode() {
   return false;
 }
 function publish() {
-  if (!win || win.isDestroyed()) return;
+  if (!win || win.isDestroyed() || !activeTab || closing) return;
   const wc = view.webContents;
   layout();
-  const state = { config, settings, menuOpen, addressFocused, audioError, quickCloseError, quickCloseReady: !!quickCloseControl?.ready, failure, status, zoom: wc.getZoomFactor(), url: wc.getURL(), back: wc.navigationHistory.canGoBack(), forward: wc.navigationHistory.canGoForward(), loading: wc.isLoading(), size: win.getContentSize() };
+  const state = { config, settings, menuOpen, addressFocused, audioError, quickCloseError, quickCloseReady: !!quickCloseControl?.ready, failure: activeTab.failure, status: activeTab.status, tabs: tabs.map(tab => ({ id: tab.id, title: tab.view.webContents.getTitle() || tab.view.webContents.getURL() || '新标签页', active: tab === activeTab, loading: tab.view.webContents.isLoading() })), zoom: wc.getZoomFactor(), url: wc.getURL(), back: wc.navigationHistory.canGoBack(), forward: wc.navigationHistory.canGoForward(), loading: wc.isLoading(), size: win.getContentSize() };
   win.webContents.send('state', state);
   if (menuWindow && !menuWindow.isDestroyed()) menuWindow.webContents.send('state', state);
 }
-async function navigate(input) {
+async function navigate(input, tab = activeTab) {
   const target = resolveAddress(input);
   addressFocused = false;
-  failure = ''; status = '正在加载…'; publish();
-  try { await view.webContents.loadURL(target); }
-  catch (error) { if (error.code !== 'ERR_ABORTED') { failure = `网页未能打开：${error.code || '网络连接失败'}`; status = failure; publish(); } }
+  tab.failure = ''; tab.status = '正在加载…'; publish();
+  try { await tab.view.webContents.loadURL(target); }
+  catch (error) { if (error.code !== 'ERR_ABORTED' && !tab.view.webContents.isDestroyed()) { tab.failure = `网页未能打开：${error.code || '网络连接失败'}`; tab.status = tab.failure; publish(); } }
 }
-function leaveVideoFullscreen() {
-  if (!htmlFullscreen || !win || win.isDestroyed()) return;
-  htmlFullscreen = false;
+function leaveVideoFullscreen(tab = activeTab) {
+  if (!tab.htmlFullscreen || !win || win.isDestroyed()) return;
+  tab.htmlFullscreen = false;
   publish();
 }
 function focusAddress() {
@@ -154,8 +164,6 @@ app.whenReady().then(() => {
       if ((wParam.readUInt32LE(0) & 0xfff0) === 0xf000) edgeResizeBounds = win.getBounds();
     });
   }
-  view = new WebContentsView({ webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, partition: 'persist:browsing', disableHtmlFullscreenWindowResize: true } });
-  win.contentView.addChildView(view);
   function showWindowMenu() {
     if (menuOpen) { closeWindowMenu(); return; }
     const bounds = win.getBounds();
@@ -163,7 +171,7 @@ app.whenReady().then(() => {
     const width = Math.min(220, work.width), height = Math.min(205, work.height);
     menuWindow = new BrowserWindow({ parent: win, width, height,
       x: Math.max(work.x, Math.min(bounds.x + bounds.width - width, work.x + work.width - width)),
-      y: Math.max(work.y, Math.min(bounds.y + 30, work.y + work.height - height)),
+      y: Math.max(work.y, Math.min(bounds.y + chromeHeight, work.y + work.height - height)),
       frame: false, resizable: false, maximizable: false, fullscreenable: false, minimizable: false,
       skipTaskbar: true, show: false, alwaysOnTop: !!config.top, backgroundColor: '#f5f9ff',
       webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
@@ -188,67 +196,108 @@ app.whenReady().then(() => {
   win.on('moved', () => { movingWindow = false; });
   win.on('resized', () => { movingWindow = false; });
   win.webContents.on('context-menu', showWindowMenu);
-  const wc = view.webContents;
-  wc.on('did-frame-finish-load', (_event, _main, processId, routingId) => {
-    if (!mediaAway) return;
-    const { webFrameMain } = require('electron');
-    const frame = webFrameMain.fromId(processId, routingId);
-    if (frame && !frame.detached) frame.executeJavaScript(mediaPauseScript(true)).catch(() => {});
+  function createTab(input = config.home, activate = true) {
+    const target = resolveAddress(input);
+    const tabView = new WebContentsView({ webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, partition: 'persist:browsing', disableHtmlFullscreenWindowResize: true } });
+    const tab = { id: nextTabId++, view: tabView, failure: '', status: '就绪', htmlFullscreen: false };
+    tabs.push(tab); win.contentView.addChildView(tabView); tabView.setVisible(false);
+    const wc = tabView.webContents;
+    wc.setAudioMuted(config.muted || config.volume === 0);
+    wc.setZoomMode('isolated');
+    wc.on('did-frame-finish-load', (_event, _main, processId, routingId) => {
+      if (!mediaAway) return;
+      const frame = require('electron').webFrameMain.fromId(processId, routingId);
+      if (frame && !frame.detached) frame.executeJavaScript(mediaPauseScript(true)).catch(() => {});
+    });
+    wc.on('enter-html-full-screen', () => {
+      if (tab !== activeTab) { wc.executeJavaScript('document.exitFullscreen()').catch(() => {}); return; }
+      tab.htmlFullscreen = true; closeWindowMenu(); publish(); wc.focus();
+    });
+    wc.on('leave-html-full-screen', () => leaveVideoFullscreen(tab));
+    const guardNavigation = (event, url) => {
+      try { const parsed = new URL(url); if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) event.preventDefault(); }
+      catch { event.preventDefault(); }
+    };
+    wc.on('will-navigate', guardNavigation); wc.on('will-redirect', guardNavigation);
+    wc.setWindowOpenHandler(({ url, disposition }) => {
+      try { createTab(resolveAddress(url), disposition !== 'background-tab'); }
+      catch { tab.status = '此链接类型暂不支持'; publish(); }
+      return { action: 'deny' };
+    });
+    wc.on('did-start-loading', () => { tab.failure = ''; tab.status = '正在加载…'; publish(); });
+    wc.on('did-stop-loading', () => { if (!tab.failure) tab.status = '就绪'; publish(); });
+    wc.on('did-fail-load', (_e, code, description, _url, mainFrame) => { if (mainFrame && code !== -3) { tab.failure = `网页未能打开：${description}`; tab.status = tab.failure; publish(); } });
+    wc.on('render-process-gone', () => { tab.htmlFullscreen = false; tab.failure = '网页进程已停止，请刷新重试'; tab.status = tab.failure; publish(); });
+    for (const event of ['did-navigate', 'did-navigate-in-page', 'page-title-updated', 'did-finish-load']) wc.on(event, publish);
+    wc.on('before-input-event', shortcut);
+    if (!activeTab || activate) selectTab(tab.id);
+    navigate(target, tab); layout();
+    return tab;
+  }
+  function selectTab(id) {
+    const tab = tabs.find(item => item.id === id);
+    if (!tab) throw new Error('标签页已关闭');
+    if (activeTab && activeTab !== tab && activeTab.htmlFullscreen) {
+      activeTab.view.webContents.executeJavaScript('document.exitFullscreen()').catch(() => {});
+      activeTab.htmlFullscreen = false;
+    }
+    activeTab = tab; view = tab.view; addressFocused = false;
+    closeWindowMenu(); publish();
+    if (!settings && !tab.failure && win.isVisible()) view.webContents.focus();
+  }
+  function closeTab(id) {
+    const index = tabs.findIndex(tab => tab.id === id);
+    if (index < 0) return;
+    const [tab] = tabs.splice(index, 1);
+    win.contentView.removeChildView(tab.view);
+    if (tab === activeTab) {
+      activeTab = undefined;
+      if (tabs.length) selectTab(tabs[Math.min(index, tabs.length - 1)].id);
+      else createTab();
+    }
+    if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
+    publish();
+  }
+  createTab(config.home);
+  const session = view.webContents.session;
+  const isBrowserContents = requester => tabs.some(tab => tab.view.webContents === requester);
+  session.setPermissionRequestHandler((requester, permission, callback) => callback(isBrowserContents(requester) && permission === 'fullscreen'));
+  session.setPermissionCheckHandler((requester, permission) => isBrowserContents(requester) && permission === 'fullscreen');
+  session.on('will-download', (_event, item) => {
+    const target = dialog.showSaveDialogSync(win, { title: '保存下载文件', defaultPath: item.getFilename() });
+    if (!target) return item.cancel();
+    item.setSavePath(target);
+    item.once('done', (_e, state) => { if (!closing) { activeTab.status = state === 'completed' ? '下载完成' : '下载未完成'; publish(); } });
   });
-  wc.setAudioMuted(config.muted || config.volume === 0);
-  audioControl = createAudioControl(app, error => {
-    if (audioError !== error) { audioError = error; publish(); }
-  });
+  audioControl = createAudioControl(app, error => { if (audioError !== error) { audioError = error; publish(); } });
   audioControl.apply(config.volume, config.muted);
   quickCloseControl = createQuickClose(app, () => {
     if (quickClosing || win.isDestroyed()) return;
-    quickClosing = true;
-    win.webContents.send('quick-close');
+    quickClosing = true; win.webContents.send('quick-close');
     setTimeout(() => { if (!win.isDestroyed()) win.close(); }, 500).unref();
   }, () => {
-    manualHidden = !manualHidden;
-    manualReveal = !manualHidden;
-    closeWindowMenu();
+    manualHidden = !manualHidden; manualReveal = !manualHidden; closeWindowMenu();
     if (manualHidden) win.hide();
     else {
       if (win.isMinimized()) win.restore();
       stealthHidden = false; win.show(); win.setAlwaysOnTop(!!config.top); win.moveTop();
-      if (!settings && !failure) wc.focus();
+      if (!settings && !activeTab.failure) view.webContents.focus();
     }
     syncMediaPause(); publish();
   }, error => { quickCloseError = error; publish(); });
   quickCloseControl.apply(config.quickClose, config.quickCloseKey);
-  wc.setZoomMode('isolated');
-  wc.session.setPermissionRequestHandler((requester, permission, callback) => callback(requester === wc && permission === 'fullscreen'));
-  wc.session.setPermissionCheckHandler((requester, permission) => requester === wc && permission === 'fullscreen');
-  wc.on('enter-html-full-screen', () => {
-    if (htmlFullscreen) return;
-    htmlFullscreen = true;
-    closeWindowMenu();
-    publish();
-    wc.focus();
-  });
-  wc.on('leave-html-full-screen', leaveVideoFullscreen);
-  wc.session.on('will-download', (_event, item) => {
-    const target = dialog.showSaveDialogSync(win, { title: '保存下载文件', defaultPath: item.getFilename() });
-    if (!target) return item.cancel();
-    item.setSavePath(target);
-    item.once('done', (_e, state) => { status = state === 'completed' ? '下载完成' : '下载未完成'; publish(); });
-  });
-  const guardNavigation = (event, url) => { try { const parsed = new URL(url); if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) event.preventDefault(); } catch { event.preventDefault(); } };
-  wc.on('will-navigate', guardNavigation);
-  wc.on('will-redirect', guardNavigation);
-  wc.setWindowOpenHandler(({ url }) => { try { const target = resolveAddress(url); navigate(target); } catch { status = '此链接类型暂不支持'; publish(); } return { action: 'deny' }; });
-  wc.on('did-start-loading', () => { failure = ''; status = '正在加载…'; publish(); });
-  wc.on('did-stop-loading', () => { if (!failure) status = '就绪'; publish(); });
-  wc.on('did-fail-load', (_e, code, description, _url, mainFrame) => { if (mainFrame && code !== -3) { failure = `网页未能打开：${description}`; status = failure; publish(); } });
-  wc.on('render-process-gone', () => { leaveVideoFullscreen(); failure = '网页进程已停止，请刷新重试'; status = failure; publish(); });
-  for (const event of ['did-navigate', 'did-navigate-in-page', 'page-title-updated', 'did-finish-load']) wc.on(event, publish);
   function shortcut(event, input) {
     if (input.type !== 'keyDown') return;
-    if (htmlFullscreen && input.key === 'Escape' && !settings && !addressFocused && !menuOpen) {
+    const wc = view.webContents;
+    if (input.control && input.key.toLowerCase() === 't') { event.preventDefault(); createTab(); return; }
+    if (input.control && input.key.toLowerCase() === 'w') { event.preventDefault(); closeTab(activeTab.id); return; }
+    if (input.control && input.key === 'Tab') {
+      event.preventDefault(); const index = tabs.indexOf(activeTab);
+      selectTab(tabs[(index + (input.shift ? tabs.length - 1 : 1)) % tabs.length].id); return;
+    }
+    if (activeTab.htmlFullscreen && input.key === 'Escape' && !settings && !addressFocused && !menuOpen) {
       event.preventDefault();
-      wc.executeJavaScript('document.exitFullscreen()').catch(leaveVideoFullscreen);
+      wc.executeJavaScript('document.exitFullscreen()').catch(() => leaveVideoFullscreen());
       return;
     }
     if (input.control && input.key.toLowerCase() === 'l') { event.preventDefault(); focusAddress(); }
@@ -256,7 +305,7 @@ app.whenReady().then(() => {
     if (input.alt && input.key === 'ArrowLeft' && wc.navigationHistory.canGoBack()) { event.preventDefault(); wc.navigationHistory.goBack(); }
     if (input.alt && input.key === 'ArrowRight' && wc.navigationHistory.canGoForward()) { event.preventDefault(); wc.navigationHistory.goForward(); }
   }
-  wc.on('before-input-event', shortcut); win.webContents.on('before-input-event', shortcut);
+  win.webContents.on('before-input-event', shortcut);
   win.webContents.on('will-navigate', event => event.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   ipcMain.handle('command', async (event, action, value) => {
@@ -264,8 +313,12 @@ app.whenReady().then(() => {
     const fromMenu = menuWindow && !menuWindow.isDestroyed() && event.sender === menuWindow.webContents && event.senderFrame?.url === menuURL;
     if (!fromMain && !fromMenu) return { error: '无效调用' };
     try {
+      const wc = view.webContents;
       switch (action) {
         case 'ready': publish(); break;
+        case 'tab-new': createTab(); break;
+        case 'tab-select': selectTab(Number(value)); break;
+        case 'tab-close': closeTab(Number(value)); break;
         case 'focus-address': focusAddress(); break;
         case 'address-focus': addressFocused = !!value; break;
         case 'quick-close-capture': if (!fromMain) throw new Error('无效调用'); quickCloseControl.capture(!!value); break;
@@ -276,9 +329,9 @@ app.whenReady().then(() => {
           if (!Number.isInteger(volume) || volume < 0 || volume > 100) throw new Error('音量范围为 0–100');
           config.volume = volume;
           if (value.muted !== undefined) config.muted = !!value.muted;
-          wc.setAudioMuted(config.muted || config.volume === 0);
+          for (const tab of tabs) tab.view.webContents.setAudioMuted(config.muted || config.volume === 0);
           audioControl.apply(config.volume, config.muted);
-          if (!save()) throw new Error(status);
+          if (!save()) throw new Error(activeTab.status);
           break;
         }
         case 'menu': showWindowMenu(); break;
@@ -286,7 +339,7 @@ app.whenReady().then(() => {
         case 'home': await navigate(config.home); break;
         case 'back': if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); break;
         case 'forward': if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); break;
-        case 'reload': if (wc.getURL()) { failure = ''; wc.reload(); } break;
+        case 'reload': if (wc.getURL()) { activeTab.failure = ''; wc.reload(); } break;
         case 'settings': settings = !!value; break;
         case 'minimize': win.minimize(); break;
         case 'close': win.close(); return {};
@@ -307,8 +360,8 @@ app.whenReady().then(() => {
           win.setBounds({ width: config.width, height: config.height, x: Math.max(workArea.x, Math.min(bounds.x, workArea.x + workArea.width - config.width)), y: Math.max(workArea.y, Math.min(bounds.y, workArea.y + workArea.height - config.height)) });
           win.setTitle(config.title); win.setAlwaysOnTop(config.top);
           if (menuWindow && !menuWindow.isDestroyed()) menuWindow.setAlwaysOnTop(config.top);
-          status = '设置已保存';
-          if (!save()) throw new Error(status);
+          activeTab.status = '设置已保存';
+          if (!save()) throw new Error(activeTab.status);
           syncMediaPause();
           break;
         }
@@ -332,8 +385,8 @@ app.whenReady().then(() => {
     }
     [config.width, config.height] = win.getSize(); publish(); clearTimeout(saveTimer); saveTimer = setTimeout(save, 300);
   });
-  win.on('close', () => { save(); closeWindowMenu(); });
-  win.on('closed', () => { clearInterval(cursorTimer); clearTimeout(saveTimer); audioControl.close(); quickCloseControl.close(); if (!wc.isDestroyed()) wc.close(); });
+  win.on('close', () => { closing = true; save(); closeWindowMenu(); });
+  win.on('closed', () => { clearInterval(cursorTimer); clearTimeout(saveTimer); audioControl.close(); quickCloseControl.close(); for (const tab of tabs) if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close(); });
   cursorTimer = setInterval(() => {
     if (menuWindow && !menuWindow.isDestroyed() && menuWindow.isVisible()) {
       const point = screen.getCursorScreenPoint(), bounds = menuWindow.getContentBounds();
@@ -346,7 +399,6 @@ app.whenReady().then(() => {
   }, 100);
   Menu.setApplicationMenu(null);
   win.loadFile('index.html');
-  navigate(config.home);
   win.once('ready-to-show', () => { win.show(); syncStealthMode(); publish(); });
 });
 app.on('window-all-closed', () => app.quit());
